@@ -68,3 +68,24 @@ Thumbs.db
 .roo/
 .trae/
 .windsurf/
+
+# InsForge & AI agent skills
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.kilocode
+.qoder
+.qwen
+.roo
+.trae
+.windsurf
+
+# Personal files - never commit (photos, private notes, built binaries)
+AGENTS.local.md
+/me.jpeg
+/*.jpeg
+/profile-placeholder.pgm
+/kindle-dashboard-new-binary

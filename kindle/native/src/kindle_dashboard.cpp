@@ -40,6 +40,9 @@ const int kCardInnerWidth = 36;
 const int kMaxLists = 4;
 const int kMaxItems = 16;
 const int kMaxRecipes = 12;
+const int kMaxStocks = 6;
+const int kMaxHeadlines = 5;
+const int kHeadlineChars = 96;
 const int kBitmapFallbackWidth = 760;
 const int kBitmapFallbackHeight = 1024;
 const int kKindleStatusBarHeight = 66;
@@ -114,6 +117,12 @@ struct RecipeRecord {
   int rating_tenths;
 };
 
+struct StockQuote {
+  char symbol[10];
+  int price_cents;
+  int change_tenths;
+};
+
 struct Dashboard {
   char generated_at[40];
   char version[32];
@@ -137,6 +146,18 @@ struct Dashboard {
   int recipe_count;
   int meal_plan_recipe_indices[kMaxRecipes];
   int meal_plan_count;
+  int weather_ok;
+  int weather_temp;
+  int weather_high;
+  int weather_low;
+  char weather_unit[4];
+  char weather_condition[24];
+  StockQuote stocks[kMaxStocks];
+  int stock_count;
+  char ai_news[kMaxHeadlines][kHeadlineChars];
+  int ai_news_count;
+  char news[kMaxHeadlines][kHeadlineChars];
+  int news_count;
 };
 
 struct Options {
@@ -552,6 +573,63 @@ int parseMealPlan(const char* json, Dashboard* dashboard) {
   return 1;
 }
 
+void parseStocks(const char* json, Dashboard* dashboard) {
+  dashboard->stock_count = 0;
+  const char* stocks_value = findKeyInRange(json, NULL, "stocks");
+  if (!stocks_value || *stocks_value != '[') return;
+  const char* stocks_end = matchingClose(stocks_value, ']');
+  if (!stocks_end) return;
+
+  const char* cursor = stocks_value + 1;
+  while (cursor < stocks_end && dashboard->stock_count < kMaxStocks) {
+    const char* object_start = strchr(cursor, '{');
+    if (!object_start || object_start >= stocks_end) break;
+    const char* object_end = matchingClose(object_start, '}');
+    if (!object_end || object_end > stocks_end) break;
+
+    StockQuote* quote = &dashboard->stocks[dashboard->stock_count];
+    extractString(object_start, object_end, "symbol", quote->symbol, sizeof(quote->symbol), "");
+    quote->price_cents = extractScaledInt(object_start, object_end, "price", 100, -1);
+    quote->change_tenths = extractScaledInt(object_start, object_end, "change_pct", 10, 0);
+    if (quote->symbol[0] && quote->price_cents >= 0) dashboard->stock_count++;
+    cursor = object_end + 1;
+  }
+}
+
+void parseHeadlines(const char* json, const char* key, char out[][kHeadlineChars], int* count) {
+  *count = 0;
+  const char* array_value = findKeyInRange(json, NULL, key);
+  if (!array_value || *array_value != '[') return;
+  const char* array_end = matchingClose(array_value, ']');
+  if (!array_end) return;
+
+  const char* cursor = skipWhitespace(array_value + 1);
+  while (cursor && cursor < array_end && *count < kMaxHeadlines) {
+    while (cursor < array_end && *cursor != '"') cursor++;
+    if (cursor >= array_end) break;
+    const char* after = NULL;
+    if (!parseJsonString(cursor, out[*count], kHeadlineChars, &after)) break;
+    if (out[*count][0]) (*count)++;
+    cursor = after;
+  }
+}
+
+void parseWeather(const char* json, Dashboard* dashboard) {
+  dashboard->weather_ok = 0;
+  const char* weather_value = findKeyInRange(json, NULL, "weather");
+  if (!weather_value || *weather_value != '{') return;
+  const char* weather_end = matchingClose(weather_value, '}');
+  if (!weather_end) return;
+
+  dashboard->weather_temp = extractInt(weather_value, weather_end, "temp", -1000);
+  if (dashboard->weather_temp == -1000) return;
+  dashboard->weather_high = extractInt(weather_value, weather_end, "high", dashboard->weather_temp);
+  dashboard->weather_low = extractInt(weather_value, weather_end, "low", dashboard->weather_temp);
+  extractString(weather_value, weather_end, "unit", dashboard->weather_unit, sizeof(dashboard->weather_unit), "C");
+  extractString(weather_value, weather_end, "condition", dashboard->weather_condition, sizeof(dashboard->weather_condition), "");
+  dashboard->weather_ok = 1;
+}
+
 int parseDashboard(const char* json, Dashboard* dashboard) {
   memset(dashboard, 0, sizeof(*dashboard));
   copyText(dashboard->steps_unit, sizeof(dashboard->steps_unit), "steps");
@@ -598,6 +676,10 @@ int parseDashboard(const char* json, Dashboard* dashboard) {
   }
   parseRecipes(json, dashboard);
   parseMealPlan(json, dashboard);
+  parseWeather(json, dashboard);
+  parseStocks(json, dashboard);
+  parseHeadlines(json, "ai_news", dashboard->ai_news, &dashboard->ai_news_count);
+  parseHeadlines(json, "news", dashboard->news, &dashboard->news_count);
   return 1;
 }
 
@@ -896,6 +978,13 @@ unsigned char glyphRow(char ch, int row) {
     case '|': { static const unsigned char g[7] = {4,4,4,4,4,4,4}; return g[row]; }
     case '!': { static const unsigned char g[7] = {4,4,4,4,4,0,4}; return g[row]; }
     case '#': { static const unsigned char g[7] = {10,31,10,10,31,10,0}; return g[row]; }
+    case '\'': { static const unsigned char g[7] = {4,4,8,0,0,0,0}; return g[row]; }
+    case '?': { static const unsigned char g[7] = {14,17,1,2,4,0,4}; return g[row]; }
+    case '$': { static const unsigned char g[7] = {4,15,20,14,5,30,4}; return g[row]; }
+    case '&': { static const unsigned char g[7] = {12,18,20,8,21,18,13}; return g[row]; }
+    case '(': { static const unsigned char g[7] = {2,4,8,8,8,4,2}; return g[row]; }
+    case ')': { static const unsigned char g[7] = {8,4,2,2,2,4,8}; return g[row]; }
+    case ';': { static const unsigned char g[7] = {0,4,4,0,4,4,8}; return g[row]; }
     default: { static const unsigned char g[7] = {31,1,2,4,4,0,4}; return g[row]; }
   }
 }
@@ -1431,14 +1520,117 @@ void drawListCard(Canvas* canvas, int x, int y, int w, int h, const List* list, 
   }
 }
 
-void drawMealPlannerTile(Canvas* canvas, int x, int y, int w, int h) {
+void drawCardHeader(Canvas* canvas, int x, int y, int w, const char* title) {
+  fillRect(canvas, x + 3, y + 3, w - 6, 44, 255);
+  line(canvas, x + 10, y + 47, x + w - 10, y + 47, 2, 0);
+  drawTextCentered(canvas, x + w / 2, y + 13, w - 24, title, 3, 0);
+}
+
+void drawStocksCard(Canvas* canvas, const Dashboard* dashboard, int x, int y, int w, int h) {
   strokeRect(canvas, x, y, w, h, 3, 0);
-  Rect tile_rect = {x, y, w, h};
-  addTouchRegion(tile_rect, kTouchOpenMealPlanner, -1, -1, "", 0);
-  drawPgmImageCover(canvas, x + 3, y + 3, w - 6, h - 6, kMealCoverPath, kMealCoverLocalPath, framebufferInvertForVisibleImage(0));
+  drawCardHeader(canvas, x, y, w, "STOCKS");
+  if (dashboard->stock_count == 0) {
+    drawTextCentered(canvas, x + w / 2, y + h / 2 - 4, w - 24, "STOCKS UNAVAILABLE", 3, 0);
+    return;
+  }
+
+  const int body_y = y + 52;
+  const int body_h = h - 52 - 6;
+  const int row_h = body_h / dashboard->stock_count;
+  const int scale = row_h >= 42 ? 3 : 2;
+  const int change_col_w = textWidth("+00.0%", scale);
+  for (int i = 0; i < dashboard->stock_count; i++) {
+    const StockQuote* quote = &dashboard->stocks[i];
+    const int text_y = body_y + i * row_h + (row_h - scale * 7) / 2;
+    drawTextClipped(canvas, x + 18, text_y, w / 3, quote->symbol, scale, 0);
+
+    char price_text[24];
+    snprintf(price_text, sizeof(price_text), "%d.%02d", quote->price_cents / 100, quote->price_cents % 100);
+    const int price_w = textWidth(price_text, scale);
+    drawText(canvas, x + w - 18 - change_col_w - 30 - price_w, text_y, price_text, scale, 0);
+
+    char change_text[24];
+    const int tenths = quote->change_tenths;
+    const int abs_tenths = tenths < 0 ? -tenths : tenths;
+    snprintf(change_text, sizeof(change_text), "%s%d.%d%%", tenths < 0 ? "-" : "+", abs_tenths / 10, abs_tenths % 10);
+    const int change_w = textWidth(change_text, scale);
+    drawText(canvas, x + w - 18 - change_w, text_y, change_text, scale, 0);
+
+    if (i > 0) line(canvas, x + 12, body_y + i * row_h, x + w - 12, body_y + i * row_h, 1, 128);
+  }
+}
+
+void drawNewsCard(Canvas* canvas, const char* title, const char headlines[][kHeadlineChars], int count, int x, int y, int w, int h) {
+  strokeRect(canvas, x, y, w, h, 3, 0);
+  drawCardHeader(canvas, x, y, w, title);
+  if (count == 0) {
+    drawTextCentered(canvas, x + w / 2, y + h / 2 - 4, w - 24, "NO HEADLINES", 2, 0);
+    return;
+  }
+
+  const int body_y = y + 54;
+  const int body_h = h - 54 - 8;
+  const int row_h = body_h / count;
+  for (int i = 0; i < count; i++) {
+    char row[112];
+    snprintf(row, sizeof(row), "%s", headlines[i]);
+    const int text_y = body_y + i * row_h + (row_h - 14) / 2;
+    fillRect(canvas, x + 16, text_y + 4, 6, 6, 0);
+    drawTextClipped(canvas, x + 32, text_y, w - 48, row, 2, 0);
+  }
+}
+
+void drawDegreeMark(Canvas* canvas, int cx, int cy, int radius, unsigned char color) {
+  const int outer2 = radius * radius;
+  const int inner = radius > 3 ? radius - 3 : 1;
+  const int inner2 = inner * inner;
+  for (int y = cy - radius; y <= cy + radius; y++) {
+    for (int x = cx - radius; x <= cx + radius; x++) {
+      const int dx = x - cx;
+      const int dy = y - cy;
+      const int d2 = dx * dx + dy * dy;
+      if (d2 <= outer2 && d2 >= inner2) setPixel(canvas, x, y, color);
+    }
+  }
+}
+
+void drawWeatherTile(Canvas* canvas, const Dashboard* dashboard, int x, int y, int w, int h) {
+  strokeRect(canvas, x, y, w, h, 3, 0);
   fillRect(canvas, x + 3, y + 3, w - 6, 50, 255);
   line(canvas, x + 10, y + 53, x + w - 10, y + 53, 2, 0);
-  drawTextCentered(canvas, x + w / 2, y + 14, w - 24, "MEAL PLANNER", 4, 0);
+  drawTextCentered(canvas, x + w / 2, y + 14, w - 24, "WEATHER", 4, 0);
+
+  const int body_y = y + 53;
+  const int body_h = h - (body_y - y);
+  if (!dashboard->weather_ok) {
+    drawTextCentered(canvas, x + w / 2, body_y + body_h / 2 - 10, w - 24, "WEATHER UNAVAILABLE", 3, 0);
+    return;
+  }
+
+  char temp_text[16];
+  snprintf(temp_text, sizeof(temp_text), "%d", dashboard->weather_temp);
+  const int temp_scale = h >= 300 ? 9 : 7;
+  const int unit_scale = temp_scale >= 9 ? 4 : 3;
+  const int degree_radius = unit_scale * 3;
+  const int temp_w = textWidth(temp_text, temp_scale);
+  const int unit_w = textWidth(dashboard->weather_unit, unit_scale);
+  const int group_w = temp_w + degree_radius * 2 + 6 + unit_w;
+  const int temp_x = x + (w - group_w) / 2;
+  const int content_h = temp_scale * 7 + 26 + 3 * 7 + 46 + 3 * 7;
+  int temp_y = body_y + (body_h - content_h) / 2;
+  if (temp_y < body_y + 16) temp_y = body_y + 16;
+  drawText(canvas, temp_x, temp_y, temp_text, temp_scale, 0);
+  drawDegreeMark(canvas, temp_x + temp_w + degree_radius, temp_y + degree_radius, degree_radius, 0);
+  drawText(canvas, temp_x + temp_w + degree_radius * 2 + 6, temp_y, dashboard->weather_unit, unit_scale, 0);
+
+  char condition[32];
+  upperCopy(condition, sizeof(condition), dashboard->weather_condition);
+  const int condition_y = temp_y + temp_scale * 7 + 26;
+  drawTextCentered(canvas, x + w / 2, condition_y, w - 24, condition, 3, 0);
+
+  char range_text[48];
+  snprintf(range_text, sizeof(range_text), "HI %d / LO %d", dashboard->weather_high, dashboard->weather_low);
+  drawTextCentered(canvas, x + w / 2, condition_y + 46, w - 24, range_text, 3, 0);
 }
 
 void drawChallengeTile(Canvas* canvas, int x, int y, int size) {
@@ -1976,31 +2168,33 @@ void drawBitmapDashboard(Canvas* canvas, const Dashboard* dashboard, const char*
   const int stat_h = shell_h < 900 ? 220 : 252;
   const int stat_w = (shell_w - 20 - gap * 2) / 3;
   drawImageCard(canvas, shell_x + 10, stat_y, stat_w, stat_h, kProfileCardPath, kProfileCardLocalPath);
-  drawRadialMetric(canvas, shell_x + 10 + stat_w + gap, stat_y, stat_w, stat_h, "STEPS", dashboard->steps, dashboard->steps_target, dashboard->steps_unit);
-  drawRadialMetric(canvas, shell_x + 10 + (stat_w + gap) * 2, stat_y, stat_w, stat_h, "CALORIES", dashboard->calories, dashboard->calories_target, dashboard->calories_unit);
+  drawStocksCard(canvas, dashboard, shell_x + 10 + stat_w + gap, stat_y, shell_w - 20 - stat_w - gap, stat_h);
 
   const int footer_h = 44;
   const int lists_y = stat_y + stat_h + gap;
   const int lists_h = shell_y + shell_h - lists_y - footer_h - gap - 10;
   const int list_w = (shell_w - 20 - gap) / 2;
   if (dashboard->list_count > 0) {
-    int challenge_side = list_w;
-    if (lists_h < challenge_side + 128) challenge_side = lists_h - 128;
-    if (challenge_side < 160) challenge_side = 160;
-    const int challenge_gap = gap;
-    const int chores_h = lists_h - challenge_side - challenge_gap;
+    int news_area_h = list_w;
+    if (lists_h < news_area_h + 128) news_area_h = lists_h - 128;
+    if (news_area_h < 160) news_area_h = 160;
+    const int chores_h = lists_h - news_area_h - gap;
     drawListCard(canvas, shell_x + 10, lists_y, list_w, chores_h, &dashboard->lists[0], 0);
-    drawChallengeTile(canvas, shell_x + 10, lists_y + chores_h + challenge_gap, challenge_side);
+    const int news_y = lists_y + chores_h + gap;
+    const int ai_news_h = (news_area_h - gap) / 2;
+    const int news_h = news_area_h - ai_news_h - gap;
+    drawNewsCard(canvas, "AI NEWS", dashboard->ai_news, dashboard->ai_news_count, shell_x + 10, news_y, list_w, ai_news_h);
+    drawNewsCard(canvas, "LATEST NEWS", dashboard->news, dashboard->news_count, shell_x + 10, news_y + ai_news_h + gap, list_w, news_h);
   }
   if (dashboard->list_count > 1) {
     const int right_x = shell_x + 10 + list_w + gap;
     int challenge_side = list_w;
     if (lists_h < challenge_side + 128) challenge_side = lists_h - 128;
     if (challenge_side < 160) challenge_side = 160;
-    int meal_tile_h = lists_h - challenge_side - gap;
-    const int grocery_h = lists_h - meal_tile_h - gap;
-    drawMealPlannerTile(canvas, right_x, lists_y, list_w, meal_tile_h);
-    drawListCard(canvas, right_x, lists_y + meal_tile_h + gap, list_w, grocery_h, &dashboard->lists[1], 1);
+    int weather_tile_h = lists_h - challenge_side - gap;
+    const int grocery_h = lists_h - weather_tile_h - gap;
+    drawWeatherTile(canvas, dashboard, right_x, lists_y, list_w, weather_tile_h);
+    drawListCard(canvas, right_x, lists_y + weather_tile_h + gap, list_w, grocery_h, &dashboard->lists[1], 1);
   }
 
   doubleRect(canvas, shell_x + 10, shell_y + shell_h - footer_h - 10, shell_w - 20, footer_h, 0);
@@ -2307,11 +2501,9 @@ void flashTouchRectOnFramebuffer(Rect rect) {
   const int right = rect.x + rect.w > static_cast<int>(vinfo.xres) ? static_cast<int>(vinfo.xres) : rect.x + rect.w;
   const int bottom = rect.y + rect.h > static_cast<int>(vinfo.yres) ? static_cast<int>(vinfo.yres) : rect.y + rect.h;
   invertFramebufferArea(fb, &vinfo, &finfo, left, top, right, bottom, 0);
-  msync(fb, screensize, MS_SYNC);
   system("eips '' >/dev/null 2>&1 || true");
   usleep(120000);
   invertFramebufferArea(fb, &vinfo, &finfo, left, top, right, bottom, 0);
-  msync(fb, screensize, MS_SYNC);
   munmap(fb, screensize);
   close(fd);
   system("eips '' >/dev/null 2>&1 || true");
@@ -2346,6 +2538,11 @@ int renderToFramebuffer(const Dashboard* dashboard, const char* status, const ch
     return 0;
   }
 
+  fprintf(stderr, "render=fb-geometry xres=%u yres=%u xres_virtual=%u yres_virtual=%u xoffset=%u yoffset=%u bpp=%u line_length=%u screensize=%ld\n",
+          vinfo.xres, vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual, vinfo.xoffset, vinfo.yoffset,
+          vinfo.bits_per_pixel, finfo.line_length, screensize);
+  fflush(stderr);
+
   Canvas canvas;
   canvas.width = static_cast<int>(vinfo.xres);
   canvas.height = static_cast<int>(vinfo.yres);
@@ -2361,15 +2558,24 @@ int renderToFramebuffer(const Dashboard* dashboard, const char* status, const ch
     writePgm(save_pgm, &canvas);
     fprintf(stderr, "render=save-pgm %s width=%d height=%d\n", save_pgm, canvas.width, canvas.height);
   }
+  fprintf(stderr, "render=fb-step copy_start\n");
+  fflush(stderr);
   for (int y = kKindleStatusBarHeight; y < canvas.height; y++) {
     for (int x = 0; x < canvas.width; x++) putFramebufferPixel(fb, &vinfo, &finfo, x, y, canvas.pixels[y * canvas.width + x]);
   }
   free(canvas.pixels);
-  msync(fb, screensize, MS_SYNC);
+  fprintf(stderr, "render=fb-step copy_done\n");
+  fflush(stderr);
+  // msync() on the e-ink framebuffer mapping blocks forever on at least the
+  // PW3 (5th-gen mxcfb) kernel, and is unnecessary: MAP_SHARED writes land
+  // directly in framebuffer memory. eips triggers the display refresh.
   munmap(fb, screensize);
   close(fd);
+  fprintf(stderr, "render=fb-step unmapped\n");
+  fflush(stderr);
   system("eips '' >/dev/null 2>&1 || true");
   fprintf(stderr, "render=framebuffer ok width=%d height=%d bpp=%d\n", static_cast<int>(vinfo.xres), static_cast<int>(vinfo.yres), static_cast<int>(vinfo.bits_per_pixel));
+  fflush(stderr);
   return 1;
 }
 #else

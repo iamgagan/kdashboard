@@ -85,10 +85,26 @@ type RecipePayload = {
   }>;
 };
 
+type WeatherPayload = {
+  temp: number;
+  high: number;
+  low: number;
+  unit: "C" | "F";
+  code: number;
+  condition: string;
+};
+
+type StockPayload = {
+  symbol: string;
+  price: number;
+  change_pct: number;
+};
+
 type DashboardPayload = {
   ok: true;
   generated_at: string;
   version: string;
+  weather: WeatherPayload | null;
   health: {
     date: string | null;
     steps: number;
@@ -122,12 +138,157 @@ type DashboardPayload = {
   }>;
   meal_plan: RecipePayload[];
   recipes: RecipePayload[];
+  stocks: StockPayload[];
+  ai_news: string[];
+  news: string[];
 };
 
 const LIST_TITLES: Record<ListKey, string> = {
   todo: "Chores",
   grocery: "Grocery"
 };
+
+const WEATHER_CONDITIONS: Array<[number[], string]> = [
+  [[0], "Clear"],
+  [[1], "Mostly clear"],
+  [[2], "Partly cloudy"],
+  [[3], "Overcast"],
+  [[45, 48], "Fog"],
+  [[51, 53, 55, 56, 57], "Drizzle"],
+  [[61, 63, 80, 81], "Rain"],
+  [[65, 82], "Heavy rain"],
+  [[66, 67], "Freezing rain"],
+  [[71, 73, 77, 85], "Snow"],
+  [[75, 86], "Heavy snow"],
+  [[95, 96, 99], "Thunderstorm"]
+];
+
+function weatherCondition(code: number): string {
+  for (const [codes, label] of WEATHER_CONDITIONS) {
+    if (codes.includes(code)) return label;
+  }
+  return "Unknown";
+}
+
+const DEFAULT_AI_NEWS_FEED = "https://techcrunch.com/category/artificial-intelligence/feed/";
+const DEFAULT_NEWS_FEED = "https://feeds.bbci.co.uk/news/world/rss.xml";
+const HEADLINE_LIMIT = 5;
+
+function sanitizeHeadline(raw: string): string {
+  return raw
+    .replace(/<!\[CDATA\[|\]\]>/g, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/[‘’ʼ“”]/g, "'")
+    .replace(/[–—]/g, "-")
+    .replace(/…/g, "...")
+    // Double quotes and backslashes would need JSON escaping, and the Kindle
+    // renderer's flat key scanner can misread escaped quotes as object keys.
+    .replace(/["\\]/g, "'")
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function fetchFeedTitles(feedUrl: string, label: string): Promise<string[]> {
+  try {
+    const response = await fetch(feedUrl, {
+      signal: AbortSignal.timeout(6000),
+      headers: { "user-agent": "kdashboard/1.0 (+https://github.com/thecodedose/kdashboard)" }
+    });
+    if (!response.ok) throw new Error(`feed status ${response.status}`);
+    const xml = await response.text();
+    const titles: string[] = [];
+    const itemPattern = /<(?:item|entry)\b[\s\S]*?<title[^>]*>([\s\S]*?)<\/title>/gi;
+    let match: RegExpExecArray | null;
+    while (titles.length < HEADLINE_LIMIT && (match = itemPattern.exec(xml))) {
+      const title = sanitizeHeadline(match[1]);
+      if (title) titles.push(title.slice(0, 90));
+    }
+    return titles;
+  } catch (error) {
+    logTiming("kindle-dashboard-data", { [`${label}_error`]: errorMessage(error) });
+    return [];
+  }
+}
+
+async function fetchStocks(): Promise<StockPayload[]> {
+  const symbols = (Deno.env.get("STOCK_SYMBOLS") || "AAPL,NVDA,MSFT,SPY")
+    .split(",")
+    .map((symbol) => symbol.trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  const quotes = await Promise.all(symbols.map(async (symbol): Promise<StockPayload | null> => {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(6000),
+        headers: { "user-agent": "Mozilla/5.0 (kdashboard)" }
+      });
+      if (!response.ok) throw new Error(`yahoo status ${response.status}`);
+      const data = await response.json();
+      const meta = data?.chart?.result?.[0]?.meta;
+      const price = Number(meta?.regularMarketPrice ?? Number.NaN);
+      const previous = Number(meta?.chartPreviousClose ?? meta?.previousClose ?? Number.NaN);
+      if (!Number.isFinite(price)) throw new Error("missing price");
+      const changePct = Number.isFinite(previous) && previous > 0 ? ((price - previous) / previous) * 100 : 0;
+      return {
+        symbol,
+        price: Math.round(price * 100) / 100,
+        change_pct: Math.round(changePct * 10) / 10
+      };
+    } catch (error) {
+      logTiming("kindle-dashboard-data", { [`stock_${symbol}_error`]: errorMessage(error) });
+      return null;
+    }
+  }));
+
+  return quotes.filter((quote): quote is StockPayload => Boolean(quote));
+}
+
+async function fetchWeather(): Promise<WeatherPayload | null> {
+  const latitude = Deno.env.get("WEATHER_LATITUDE") || "40.7128";
+  const longitude = Deno.env.get("WEATHER_LONGITUDE") || "-74.0060";
+  const unit = (Deno.env.get("WEATHER_UNIT") || "C").toUpperCase() === "F" ? "F" : "C";
+  const timezone = Deno.env.get("DASHBOARD_TIMEZONE") || "Asia/Kolkata";
+  const url = new URL("https://api.open-meteo.com/v1/forecast");
+  url.searchParams.set("latitude", latitude);
+  url.searchParams.set("longitude", longitude);
+  url.searchParams.set("current", "temperature_2m,weather_code");
+  url.searchParams.set("daily", "temperature_2m_max,temperature_2m_min");
+  url.searchParams.set("temperature_unit", unit === "F" ? "fahrenheit" : "celsius");
+  url.searchParams.set("timezone", timezone);
+  url.searchParams.set("forecast_days", "1");
+
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!response.ok) throw new Error(`open-meteo status ${response.status}`);
+    const data = await response.json();
+    const code = Number(data?.current?.weather_code ?? Number.NaN);
+    const temp = Number(data?.current?.temperature_2m ?? Number.NaN);
+    const high = Number(data?.daily?.temperature_2m_max?.[0] ?? Number.NaN);
+    const low = Number(data?.daily?.temperature_2m_min?.[0] ?? Number.NaN);
+    if (!Number.isFinite(temp)) throw new Error("open-meteo payload missing temperature");
+    return {
+      temp: Math.round(temp),
+      high: Number.isFinite(high) ? Math.round(high) : Math.round(temp),
+      low: Number.isFinite(low) ? Math.round(low) : Math.round(temp),
+      unit,
+      code: Number.isFinite(code) ? code : -1,
+      condition: weatherCondition(code)
+    };
+  } catch (error) {
+    logTiming("kindle-dashboard-data", { weather_error: errorMessage(error) });
+    return null;
+  }
+}
 const COMPLETED_ITEM_HIDE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 export default async function(req: Request): Promise<Response> {
@@ -162,6 +323,10 @@ async function loadDashboardPayload(today = dashboardLocalDate()): Promise<Dashb
   });
 
   const baseStarted = timeMs();
+  const weatherPromise = fetchWeather();
+  const stocksPromise = fetchStocks();
+  const aiNewsPromise = fetchFeedTitles(Deno.env.get("AI_NEWS_FEED") || DEFAULT_AI_NEWS_FEED, "ai_news");
+  const newsPromise = fetchFeedTitles(Deno.env.get("NEWS_FEED") || DEFAULT_NEWS_FEED, "news");
   const [
     itemsResult,
     healthResult,
@@ -264,6 +429,7 @@ async function loadDashboardPayload(today = dashboardLocalDate()): Promise<Dashb
   const payloadWithoutVersion = {
     ok: true as const,
     generated_at: `${today}T00:00:00+05:30`,
+    weather: await weatherPromise,
     health: {
       date: health?.date ?? null,
       steps: Math.max(0, Number(health?.steps ?? 0)),
@@ -301,7 +467,10 @@ async function loadDashboardPayload(today = dashboardLocalDate()): Promise<Dashb
     meal_plan: mealPlanEntries
       .map((entry) => recipesById.get(entry.recipe_id))
       .filter((recipe): recipe is RecipePayload => Boolean(recipe)),
-    recipes: recipePayloads
+    recipes: recipePayloads,
+    stocks: await stocksPromise,
+    ai_news: await aiNewsPromise,
+    news: await newsPromise
   };
 
   const payload = {
