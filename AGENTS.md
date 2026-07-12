@@ -27,6 +27,10 @@ Gagan's personal deployment of thecodedose/kdashboard on a Kindle Paperwhite
 7th gen (PW3, 2015; 1072x1448, 8bpp mxcfb framebuffer, xres_virtual=1088,
 line_length=1088).
 
+Full project reference (setup story, gotchas, rebuild cheat sheet) lives in
+Notion (private page, owner access only):
+https://app.notion.com/p/39bc456b7c3d8149bc77e31cc93fddf8
+
 - Function endpoints: `https://<your-project>.<region>.insforge.app/functions/<slug>`.
 - Exception: the SSE events endpoint only works on the function host directly,
   `https://<your-project>.function2.insforge.app/kindle-dashboard-events`. Going
